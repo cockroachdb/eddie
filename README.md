@@ -17,7 +17,8 @@ Eddie solves the following two problems:
 
 Eddie aggregates any number of types that implement the
 `contract.Contract` interface and compiles them into a stand-alone
-enforcer binary. For an example, see the [concrete-return contract]().
+enforcer binary. For an example, see the
+[concrete-return contract](https://godoc.org/github.com/cockroachdb/eddie/pkg/contract/retcon).
 
 Here's a trivial example:
 
@@ -68,5 +69,5 @@ the `--include_builtins` flag.
 
 ## Applying contracts
 
-Refer to the [contract package]() for how to bind contracts to source
-elements.
+Refer to the [contract package](https://godoc.org/github.com/cockroachdb/eddie/pkg/contract)
+for how to bind contracts to source elements.
