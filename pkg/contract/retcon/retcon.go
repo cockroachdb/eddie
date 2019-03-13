@@ -67,9 +67,6 @@ type ReturnConcrete struct {
 
 	// The acceptable types which implement the target interface.
 	allowed map[*types.Named]bool
-	// We can significantly declutter the output by assuming that calls
-	// to any functions that are part of the same linting pass are clean.
-	assumeClean map[*ssa.Function]bool
 	// Used by testing to verify the output.
 	reported []dirtyFunction
 	// Accumulates information during the analysis.
@@ -92,7 +89,6 @@ func (l *ReturnConcrete) Enforce(ctx contract.Context) error {
 		return errors.New("no allowed implementation names set")
 	}
 	l.allowed = make(map[*types.Named]bool)
-	l.assumeClean = make(map[*ssa.Function]bool)
 	l.stats = make(map[*ssa.Function]*funcStat)
 
 	pgm := ctx.Program()
@@ -110,18 +106,19 @@ func (l *ReturnConcrete) Enforce(ctx contract.Context) error {
 		}
 	}
 
+	reportOn := make(map[*ssa.Function]bool)
 	for _, m := range ctx.Objects() {
 		switch t := m.(type) {
 		case *ssa.Function:
 			// Top-level function declarations.
-			l.assumeClean[t] = true
+			reportOn[t] = true
 			l.stat(t)
 		case *ssa.Type:
 			// Methods defined with value receivers.
 			methods := pgm.MethodSets.MethodSet(t.Type())
 			for i := 0; i < methods.Len(); i++ {
 				if fn := pgm.MethodValue(methods.At(i)); fn != nil {
-					l.assumeClean[fn] = true
+					reportOn[fn] = true
 					l.stat(fn)
 				}
 			}
@@ -129,7 +126,7 @@ func (l *ReturnConcrete) Enforce(ctx contract.Context) error {
 			methods = pgm.MethodSets.MethodSet(types.NewPointer(t.Type()))
 			for i := 0; i < methods.Len(); i++ {
 				if fn := pgm.MethodValue(methods.At(i)); fn != nil {
-					l.assumeClean[fn] = true
+					reportOn[fn] = true
 					l.stat(fn)
 				}
 			}
@@ -154,7 +151,7 @@ func (l *ReturnConcrete) Enforce(ctx contract.Context) error {
 
 	// Only report dirty information for the input object(s).
 	for _, s := range l.stats {
-		if s.state == stateDirty && l.assumeClean[s.fn] {
+		if s.state == stateDirty && reportOn[s.fn] {
 			l.reported = append(l.reported, s)
 		}
 	}
@@ -195,6 +192,27 @@ func (l *ReturnConcrete) analyze(ctx contract.Context, stat *funcStat) {
 	}
 }
 
+// compatibleWith indicates whether or not the target contract is at
+// least as restrictive as the other contract.
+func (l *ReturnConcrete) compatibleWith(other *ReturnConcrete) bool {
+	if l.TargetName != other.TargetName {
+		return false
+	}
+	// Ensure that the other allowable types are a strict subset of
+	// the target allowable types. We expect the number of allowed types
+	// to be very short, so throwing it into a map wouldn't be a win.
+outer:
+	for _, otherAllows := range other.AllowedNames {
+		for _, targetAllows := range l.AllowedNames {
+			if otherAllows == targetAllows {
+				continue outer
+			}
+		}
+		return false
+	}
+	return true
+}
+
 // decide will mark the given function as dirty if the type of the given
 // value is not statically-resolvable to one of the desired concrete types.
 func (l *ReturnConcrete) decide(ctx contract.Context, stat *funcStat, val ssa.Value, seen map[ssa.Value]bool) {
@@ -225,14 +243,18 @@ func (l *ReturnConcrete) decide(ctx contract.Context, stat *funcStat, val ssa.Va
 		if callees == nil {
 			l.markDirty(stat, because(t, "callee not static"))
 		} else {
+		callees:
 			for _, callee := range callees {
+				// We'll assume that any function which has a compatible
+				// contract is clean in order to declutter the output.
+				for _, other := range ctx.Hints().Get(callee, ReturnConcrete{}) {
+					if l.compatibleWith(other.(*ReturnConcrete)) {
+						continue callees
+					}
+				}
 				next := l.stat(callee)
 				l.analyze(ctx, next)
-				// Declutter the output by allowing certain calls to be
-				// assumed clean.
-				if l.assumeClean[callee] {
-					continue
-				}
+
 				switch next.state {
 				case stateClean:
 				// Already proven to be clean, ignore.

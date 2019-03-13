@@ -25,7 +25,9 @@ import (
 type contextImpl struct {
 	context.Context
 
+	contract    contract.Contract
 	declaration ssa.Member
+	hints       *contract.Hints
 	objects     []ssa.Member
 	oracle      *contract.TypeOracle
 	program     *ssa.Program
@@ -46,15 +48,15 @@ func (c *contextImpl) Contract() string { return c.target.contract }
 // Declarations implements ext.Context.
 func (c *contextImpl) Declaration() ssa.Member { return c.declaration }
 
+// Hints implements ext.Context.
+func (c *contextImpl) Hints() *contract.Hints { return c.hints }
+
 // Kind implements ext.Context.
 func (c *contextImpl) Kind() contract.Kind { return c.target.kind }
 
 // Objects implements ext.Context.
 func (c *contextImpl) Objects() []ssa.Member {
-	if o := c.objects; o != nil {
-		return o
-	}
-	return []ssa.Member{c.declaration}
+	return c.objects
 }
 
 // Oracle implements ext.Context.

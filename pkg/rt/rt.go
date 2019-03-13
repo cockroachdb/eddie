@@ -59,9 +59,6 @@ type target struct {
 	enclosing types.Object
 	// Underlying source data, for position lookups.
 	fset *token.FileSet
-	// Populated by Enforcer.expandAll() and contains a ready-to-run
-	// Contract instance.
-	impl contract.Contract
 	// Memoizes the behavior to apply to the target.
 	kind contract.Kind
 	// The object on which the contract is bound,

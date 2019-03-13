@@ -12,7 +12,7 @@
 // implied. See the License for the specific language governing
 // permissions and limitations under the License.
 
-// Package pkg defines a constant.
+// Package util contains miscellaneous code.
 package util
 
 import (

@@ -66,12 +66,11 @@ type Enforcer struct {
 	// If true, the test sources for the package will be included.
 	Tests bool
 
-	aliases     targetAliases
 	allPackages map[string]*packages.Package
-	assertions  []*assertion
+	hints       *contract.Hints
+	oracle      *contract.TypeOracle
 	pkgs        []*packages.Package
 	ssaPgm      *ssa.Program
-	targets     []*target
 
 	mu struct {
 		sync.Mutex
@@ -110,12 +109,14 @@ func (e *Enforcer) Execute(ctx context.Context) (Results, error) {
 
 	// Look for contract declarations on the AST side before we go through
 	// the bother of converting to SSA form
-	if err := e.findContracts(ctx); err != nil {
+	aliases, assertions, tgts, err := e.findContracts(ctx)
+	if err != nil {
 		return nil, err
 	}
 
 	// Expand aliases and initialize Contract instances.
-	if err := e.expandAll(ctx); err != nil {
+	work, err := e.expandAll(aliases, assertions, tgts)
+	if err != nil {
 		return nil, err
 	}
 
@@ -123,7 +124,7 @@ func (e *Enforcer) Execute(ctx context.Context) (Results, error) {
 	e.ssaPgm.Build()
 
 	// Now, we can run the contracts.
-	err = e.enforceAll(ctx)
+	err = e.enforceAll(ctx, work)
 
 	e.mu.Lock()
 
@@ -224,79 +225,29 @@ func (e *Enforcer) Main() {
 	os.Exit(0)
 }
 
-// enforce performs enforcement on a single target. This method
-// resolves the target into the various objects that we want to
-// pass into the contract implementation and then invokes the
-// contracts for validation.
-func (e *Enforcer) enforce(ctx context.Context, tgt *target) error {
-	assertions := make(contract.Assertions, len(e.assertions))
-	for _, a := range e.assertions {
-		assertions[a.intf] = append(assertions[a.intf], a.impl)
-	}
-	impl := &contextImpl{
-		Context: ctx,
-		oracle:  contract.NewOracle(e.ssaPgm, assertions),
-		program: e.ssaPgm,
-		reporter: func(r *Result) {
-			e.mu.Lock()
-			e.mu.results = append(e.mu.results, r)
-			e.mu.Unlock()
-		},
-		target: tgt,
-	}
-
-	switch tgt.kind {
-	case contract.KindInterface:
-		decl := e.ssaPgm.Package(tgt.object.Pkg()).Type(tgt.object.Name())
-		impl.declaration = decl
-		intf := decl.Type().Underlying().(*types.Interface)
-		for _, obj := range impl.Oracle().TypeImplementors(intf, e.AssertedInterfaces) {
-			impl.objects = append(impl.objects, e.ssaPgm.Package(obj.Pkg()).Type(obj.Name()))
-		}
-
-	case contract.KindInterfaceMethod:
-		intf := tgt.enclosing.Type().Underlying().(*types.Interface)
-		impl.declaration = e.ssaPgm.Package(tgt.enclosing.Pkg()).Type(tgt.enclosing.Name())
-		for _, i := range impl.Oracle().MethodImplementors(intf, tgt.object.Name(), e.AssertedInterfaces) {
-			impl.objects = append(impl.objects, i)
-		}
-
-	case contract.KindFunction, contract.KindMethod:
-		fn := tgt.object.(*types.Func)
-		impl.declaration = e.ssaPgm.FuncValue(fn)
-
-	case contract.KindType:
-		impl.declaration = e.ssaPgm.Package(tgt.object.Pkg()).Type(tgt.object.Name())
-
-	default:
-		panic(errors.Errorf("unimplemented: %s", tgt.kind))
-	}
-
-	e.printf("enforcing %s: %s %s (%d objects)",
-		e.ssaPgm.Fset.Position(tgt.pos), impl.Kind(), impl.Declaration(), len(impl.Objects()))
-
-	if err := tgt.impl.Enforce(impl); err != nil {
-		impl.Reporter().Printf("%s: %v", tgt.contract, err)
-	}
-	return nil
-}
-
 // enforceAll executes all targets.
-func (e *Enforcer) enforceAll(ctx context.Context) error {
+func (e *Enforcer) enforceAll(ctx context.Context, work []*contextImpl) error {
 	g, ctx := errgroup.WithContext(ctx)
-	ch := make(chan *target, 1)
+	ch := make(chan *contextImpl, 1)
 
 	for i := 0; i < runtime.NumCPU(); i++ {
 		g.Go(func() error {
 			for {
 				select {
-				case tgt, open := <-ch:
+				case impl, open := <-ch:
 					if !open {
 						return nil
 					}
-					if err := e.enforce(ctx, tgt); err != nil {
-						return err
+
+					e.printf("enforcing %s: %s %s (%d objects)",
+						e.ssaPgm.Fset.Position(impl.declaration.Pos()), impl.Kind(),
+						impl.Declaration(), len(impl.Objects()))
+
+					impl.Context = ctx
+					if err := impl.contract.Enforce(impl); err != nil {
+						impl.Reporter().Printf("%s: %v", impl.contract, err)
 					}
+
 				case <-ctx.Done():
 					return ctx.Err()
 				}
@@ -305,12 +256,12 @@ func (e *Enforcer) enforceAll(ctx context.Context) error {
 	}
 
 sendLoop:
-	for i, tgt := range e.targets {
+	for i, w := range work {
 		select {
-		case ch <- tgt:
-			// Nullify the reference to the target once dispatched to
-			// allow completed targets to be garbage-collected.
-			e.targets[i] = nil
+		case ch <- w:
+			// Nullify the reference to the context once dispatched to
+			// allow completed objects to be garbage-collected.
+			work[i] = nil
 		case <-ctx.Done():
 			break sendLoop
 		}
@@ -322,9 +273,9 @@ sendLoop:
 
 // expand expands alias targets into their final form or returns
 // terminal targets as-is.
-func (e *Enforcer) expand(base *target) ([]*target, error) {
+func (e *Enforcer) expand(aliases targetAliases, base *target) ([]*target, error) {
 	// Non-terminal targets, which need to be further expanded
-	nonTerm := e.aliases[base.contract]
+	nonTerm := aliases[base.contract]
 	if nonTerm == nil {
 		return targets{base}, nil
 	}
@@ -344,7 +295,7 @@ func (e *Enforcer) expand(base *target) ([]*target, error) {
 					base.fset.Position(base.Pos()), alias.contract)
 			}
 			seen[alias] = true
-			if moreExpansions := e.aliases[alias.contract]; moreExpansions != nil {
+			if moreExpansions := aliases[alias.contract]; moreExpansions != nil {
 				nonTerm = append(nonTerm, moreExpansions...)
 			} else {
 				dup := *base
@@ -360,36 +311,41 @@ func (e *Enforcer) expand(base *target) ([]*target, error) {
 
 // expandAll resolves all targets to actual Contract implementations,
 // performing alias expansion and configuration. Once this method has
-// finished, the Enforcer.targets field will be populated with all work
+// finished, the Enforcer.contexts field will be populated with all work
 // to perform.
-func (e *Enforcer) expandAll(ctx context.Context) error {
-	expanded := make(targets, 0, len(e.targets))
-	for _, tgt := range e.targets {
-		expansion, err := e.expand(tgt)
+func (e *Enforcer) expandAll(
+	aliases targetAliases, assertions assertions, tgts targets,
+) ([]*contextImpl, error) {
+	oracleAssertions := make(contract.Assertions, len(assertions))
+	for _, a := range assertions {
+		oracleAssertions[a.intf] = append(oracleAssertions[a.intf], a.impl)
+	}
+
+	// Populate the shared datastructures.
+	e.hints = contract.NewHints()
+	e.oracle = contract.NewOracle(e.ssaPgm, oracleAssertions)
+
+	// First pass, expand any aliases.
+	expanded := make(targets, 0, len(tgts))
+	for _, tgt := range tgts {
+		expansion, err := e.expand(aliases, tgt)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		expanded = append(expanded, expansion...)
 	}
 
-	for _, tgt := range expanded {
-		provider := e.Contracts[tgt.contract]
-		if provider == nil {
-			return errors.Errorf("%s: cannot find contract named %s",
-				tgt.fset.Position(tgt.Pos()), tgt.contract)
+	// Second pass, construct the contexts to invoke.
+	ret := make([]*contextImpl, len(expanded))
+	for i, tgt := range expanded {
+		ctx, err := e.newContext(tgt)
+		if err != nil {
+			return nil, err
 		}
-		tgt.impl = provider.New()
-		if tgt.config != "" {
-			// Disallow unknown fields to help with typos.
-			d := json.NewDecoder(strings.NewReader(tgt.config))
-			d.DisallowUnknownFields()
-			if err := d.Decode(&tgt.impl); err != nil {
-				return errors.Wrap(err, tgt.fset.Position(tgt.Pos()).String())
-			}
-		}
+		ret[i] = ctx
 	}
-	e.targets = expanded
-	return nil
+
+	return ret, nil
 }
 
 // findContracts performs AST-level extraction.  Specifically, it will
@@ -399,7 +355,7 @@ func (e *Enforcer) expandAll(ctx context.Context) error {
 // Since we're operating on a per-ast.File basis, we want to operate as
 // concurrently as possible. We'll set up a limited number of goroutines
 // and feed them (package, file) pairs.
-func (e *Enforcer) findContracts(ctx context.Context) error {
+func (e *Enforcer) findContracts(ctx context.Context) (targetAliases, assertions, targets, error) {
 	// mu protects the variables shared between goroutines.
 	mu := struct {
 		sync.Mutex
@@ -607,7 +563,7 @@ sendLoop:
 			continue
 		}
 		if pkg.Errors != nil {
-			return errors.Wrap(pkg.Errors[0], "could not load source due to error(s)")
+			return nil, nil, nil, errors.Wrap(pkg.Errors[0], "could not load source due to error(s)")
 		}
 
 		for _, file := range pkg.Syntax {
@@ -622,7 +578,7 @@ sendLoop:
 
 	// Wait for all the goroutines to exit.
 	if err := g.Wait(); err != nil {
-		return err
+		return nil, nil, nil, err
 	}
 
 	// Produce stable output.
@@ -632,10 +588,74 @@ sendLoop:
 	sort.Sort(mu.assertions)
 	sort.Sort(mu.targets)
 
-	e.aliases = mu.aliases
-	e.assertions = mu.assertions
-	e.targets = mu.targets
-	return nil
+	return mu.aliases, mu.assertions, mu.targets, nil
+}
+
+// newContext builds the contract.Context that contains everything
+// we need in order to evaluate the contract.
+func (e *Enforcer) newContext(tgt *target) (*contextImpl, error) {
+	provider := e.Contracts[tgt.contract]
+	if provider == nil {
+		return nil, errors.Errorf("%s: cannot find contract named %s",
+			tgt.fset.Position(tgt.Pos()), tgt.contract)
+	}
+
+	impl := &contextImpl{
+		contract: provider.New(),
+		hints:    e.hints,
+		oracle:   e.oracle,
+		program:  e.ssaPgm,
+		reporter: func(r *Result) {
+			e.mu.Lock()
+			e.mu.results = append(e.mu.results, r)
+			e.mu.Unlock()
+		},
+		target: tgt,
+	}
+
+	if tgt.config != "" {
+		// Disallow unknown fields to help with typos.
+		d := json.NewDecoder(strings.NewReader(tgt.config))
+		d.DisallowUnknownFields()
+		if err := d.Decode(&impl.contract); err != nil {
+			return nil, errors.Wrap(err, tgt.fset.Position(tgt.Pos()).String())
+		}
+	}
+
+	switch tgt.kind {
+	case contract.KindInterface:
+		decl := e.ssaPgm.Package(tgt.object.Pkg()).Type(tgt.object.Name())
+		impl.declaration = decl
+		intf := decl.Type().Underlying().(*types.Interface)
+		for _, obj := range impl.Oracle().TypeImplementors(intf, e.AssertedInterfaces) {
+			impl.objects = append(impl.objects, e.ssaPgm.Package(obj.Pkg()).Type(obj.Name()))
+		}
+
+	case contract.KindInterfaceMethod:
+		intf := tgt.enclosing.Type().Underlying().(*types.Interface)
+		impl.declaration = e.ssaPgm.Package(tgt.enclosing.Pkg()).Type(tgt.enclosing.Name())
+		for _, i := range impl.Oracle().MethodImplementors(intf, tgt.object.Name(), e.AssertedInterfaces) {
+			impl.objects = append(impl.objects, i)
+		}
+
+	case contract.KindFunction, contract.KindMethod:
+		fn := tgt.object.(*types.Func)
+		impl.declaration = e.ssaPgm.FuncValue(fn)
+		impl.objects = []ssa.Member{impl.declaration}
+
+	case contract.KindType:
+		impl.declaration = e.ssaPgm.Package(tgt.object.Pkg()).Type(tgt.object.Name())
+		impl.objects = []ssa.Member{impl.declaration}
+
+	default:
+		panic(errors.Errorf("unimplemented: %s", tgt.kind))
+	}
+
+	for _, obj := range impl.objects {
+		e.hints.Add(obj, impl.contract)
+	}
+
+	return impl, nil
 }
 
 // printf will emit a diagnostic message via e.Logger, if one is configured.

@@ -36,6 +36,9 @@ type Context interface {
 	// Declaration returns the object that the contract declaration is
 	// defined on. See additional discussion on the Contract type.
 	Declaration() ssa.Member
+	// Hints returns a reference to a shared hint store that allows
+	// contracts to store and share information.
+	Hints() *Hints
 	// Kind returns the kind of contract to be enforced.
 	Kind() Kind
 	// Objects returns a collection of objects that a specific contract

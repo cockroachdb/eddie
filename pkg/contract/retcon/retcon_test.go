@@ -38,18 +38,24 @@ type aggregator struct {
 }
 
 func (a *aggregator) Enforce(ctx contract.Context) error {
-	linter := &ReturnConcrete{
-		AllowedNames: []string{
-			a.fakePkgName + "/GoodPtrError",
-			a.fakePkgName + "/GoodValError",
-		},
-		TargetName: "error",
-	}
+	hints := ctx.Hints().Get(ctx.Objects()[0], ReturnConcrete{})
+	linter := hints[0].(*ReturnConcrete)
 	err := linter.Enforce(ctx)
 	a.mu.Lock()
 	a.mu.dirty = append(a.mu.dirty, linter.reported...)
 	a.mu.Unlock()
 	return err
+}
+
+// ImpliedHints implements the ImpliesHints interface.
+func (a *aggregator) ImpliedHints() []interface{} {
+	return []interface{}{&ReturnConcrete{
+		AllowedNames: []string{
+			a.fakePkgName + "/GoodPtrError",
+			a.fakePkgName + "/GoodValError",
+		},
+		TargetName: "error",
+	}}
 }
 
 var _ contract.Contract = &aggregator{}
@@ -64,6 +70,7 @@ func Test(t *testing.T) {
 	aggregator := &aggregator{fakePkgName: util.Base + "contract/retcon/testdata"}
 
 	e := rt.Enforcer{
+		AssertedInterfaces: true,
 		Contracts: contract.Providers{
 			"ReturnConcrete": {New: func() contract.Contract { return aggregator }},
 		},
@@ -85,16 +92,10 @@ func Test(t *testing.T) {
 		{name: "(*BadError).Self", whyLength: 1},
 		{name: "DirectBad", whyLength: 2},
 		{name: "DirectTupleBad", whyLength: 2},
-		{name: "DirectTupleBadCaller", whyLength: 3},
-		{name: "DirectTupleBadChain", whyLength: 3},
-		{name: "ExplicitReturnVarBad", whyLength: 3},
-		{name: "ExplicitReturnVarPhiBad", whyLength: 3},
 		{name: "MakesIndirectCall", whyLength: 1},
-		{name: "MakesInterfaceCallBad", whyLength: 2},
-		{name: "PhiBad", whyLength: 3},
+		{name: "PhiBad", whyLength: 2},
 		{name: "ShortestWhyPath", whyLength: 1},
 		{name: "TodoNoTypeInference", whyLength: 1}, // See doc on fn
-		{name: "UsesSelfBad", whyLength: 2},
 	}
 	a.Len(results, len(tcs))
 

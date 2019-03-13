@@ -82,14 +82,15 @@ func DirectTupleBad() (int, error) {
 	return 0, errors.New("nope")
 }
 
+// Calls another function with the contract, so it's still good.
 //contract:ReturnConcrete
-func DirectTupleBadCaller() error {
+func DirectTupleBadCallerIsGood() error {
 	_, err := DirectTupleBad()
 	return err
 }
 
 //contract:ReturnConcrete
-func DirectTupleBadChain() (int, error) {
+func DirectTupleBadChainButIsStillGood() (int, error) {
 	x, err := DirectTupleBad()
 	return x + 1, err
 }
@@ -108,7 +109,7 @@ func ExplictReturnVarNoOp() (err error) {
 }
 
 //contract:ReturnConcrete
-func ExplicitReturnVarBad() (err error) {
+func ExplicitReturnVarBadButIsStillGood() (err error) {
 	err = DirectBad()
 	return
 }
@@ -120,7 +121,7 @@ func ExplicitReturnVarGood() (err error) {
 }
 
 //contract:ReturnConcrete
-func ExplicitReturnVarPhiBad() (err error) {
+func ExplicitReturnVarPhiBadButIsStillGood() (err error) {
 	switch choose() {
 	case 0:
 		err = DirectBad()
@@ -160,8 +161,10 @@ func MakesIndirectCall(fn func() error) error {
 	return fn()
 }
 
+// Selfish.Self is marked with the contract, so this function
+// is still good.
 //contract:ReturnConcrete
-func MakesInterfaceCallBad(g Selfish) error {
+func MakesInterfaceCallBadButIsStillGood(g Selfish) error {
 	return g.Self()
 }
 
@@ -190,6 +193,8 @@ func PhiBad() error {
 		ret = DirectGood()
 	case 3:
 		ret = DirectBad()
+	case 4:
+		ret = errors.New("Nope")
 	default:
 		panic("fake code")
 	}
@@ -241,8 +246,10 @@ func TodoNoTypeInference(err error) error {
 	return GoodValError{}
 }
 
+// Since BadError.Self is supposed to pass the contract, this function
+// will be marked as good.
 //contract:ReturnConcrete
-func UsesSelfBad() error {
+func UsesSelfBadButIsStillGood() error {
 	return (&BadError{}).Self()
 }
 
