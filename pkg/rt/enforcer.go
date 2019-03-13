@@ -31,6 +31,8 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/cockroachdb/eddie/pkg/util"
+
 	"github.com/cockroachdb/eddie/pkg/contract"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
@@ -64,13 +66,12 @@ type Enforcer struct {
 	// If true, the test sources for the package will be included.
 	Tests bool
 
-	aliases      targetAliases
-	allPackages  map[string]*packages.Package
-	assertions   []*assertion
-	contractType *types.Interface
-	pkgs         []*packages.Package
-	ssaPgm       *ssa.Program
-	targets      []*target
+	aliases     targetAliases
+	allPackages map[string]*packages.Package
+	assertions  []*assertion
+	pkgs        []*packages.Package
+	ssaPgm      *ssa.Program
+	targets     []*target
 
 	mu struct {
 		sync.Mutex
@@ -102,14 +103,6 @@ func (e *Enforcer) Execute(ctx context.Context) (Results, error) {
 	e.pkgs = pkgs
 
 	e.allPackages = flattenImports(pkgs)
-
-	// If the user has imported this package, they may have declared
-	// contract aliases.  We'll need to find the underlying interface type.
-	if extPkg := e.allPackages["github.com/cockroachdb/eddie/pkg/contract"]; extPkg != nil {
-		if obj := extPkg.Types.Scope().Lookup("Contract"); obj != nil {
-			e.contractType = obj.Type().Underlying().(*types.Interface)
-		}
-	}
 
 	// Prep SSA program. We'll defer building the packages until we
 	// need to present a function to a Contract.
@@ -452,9 +445,15 @@ func (e *Enforcer) findContracts(ctx context.Context) error {
 					mu.Lock()
 					// Special case for contract aliases of the form
 					//   //contract:Foo { ... }
-					//   type Alias ext.Contract
-					if named, ok := tgt.object.Type().(*types.Named); ok && named.Underlying() == e.contractType {
-						name := named.Obj().Name()
+					//   type Alias contract.Contract
+					// The reference to "Contract" will already be resolved to
+					// the underlying types.Interface.  We can still know that
+					// it's our Contract type by looking for the sole method
+					// on the interface to be defined in our contract package.
+					if underInt, ok := tgt.object.Type().Underlying().(*types.Interface); ok &&
+						underInt.NumMethods() == 1 &&
+						util.InPackage(underInt.Method(0), util.Base+"contract") {
+						name := tgt.object.Name()
 						e.println("alias", name, ":=", tgt)
 						mu.aliases[name] = append(mu.aliases[name], tgt)
 					} else {

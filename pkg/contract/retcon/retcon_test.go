@@ -25,6 +25,7 @@ import (
 
 	"github.com/cockroachdb/eddie/pkg/contract"
 	"github.com/cockroachdb/eddie/pkg/rt"
+	"github.com/cockroachdb/eddie/pkg/util"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -60,7 +61,7 @@ func Test(t *testing.T) {
 		return
 	}
 
-	aggregator := &aggregator{fakePkgName: "github.com/cockroachdb/eddie/pkg/contract/retcon/testdata"}
+	aggregator := &aggregator{fakePkgName: util.Base + "contract/retcon/testdata"}
 
 	e := rt.Enforcer{
 		Contracts: contract.Providers{

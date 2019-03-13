@@ -25,14 +25,18 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"os/exec"
-	"path"
 	"path/filepath"
-	"reflect"
+	"strings"
 	"text/template"
 
+	"github.com/cockroachdb/eddie/pkg/util"
 	"github.com/pkg/errors"
 	"golang.org/x/tools/go/packages"
+)
+
+const (
+	contractPkg = util.Base + "contract"
+	rtPkg       = util.Base + "rt"
 )
 
 // Eddie generates a contract-enforcer binary.  See discussion on the
@@ -40,15 +44,12 @@ import (
 type Eddie struct {
 	BuildFlags []string
 	Dir        string
-	KeepTemp   bool
 	Logger     *log.Logger
 	Name       string
 	Outfile    string
 	Packages   []string
 
-	contracts   []types.Object
-	contractPkg string
-	rtPkg       string
+	contracts []types.Object
 
 	// For testing only, causes the compiled enforcer to be emitted
 	// as a golang plugin.
@@ -62,22 +63,18 @@ func (e *Eddie) Execute() error {
 	}
 
 	if e.Name == "" {
-		return errors.New("no name was set for the output binary")
+		e.Name = "enforcer"
 	}
 
 	if e.Outfile == "" {
-		e.Outfile = e.Name
+		e.Outfile = e.Name + ".go"
 	}
-
-	// Look up the package name using reflection to prevent any weirdness
-	// if the code gets moved to a new package.
-	myPkg := reflect.TypeOf(Eddie{}).PkgPath()
-	myPkg = path.Dir(myPkg)
-	e.contractPkg = path.Clean(path.Join(myPkg, "contract"))
-	e.rtPkg = path.Clean(path.Join(myPkg, "rt"))
 
 	if err := e.findContracts(); err != nil {
 		return err
+	}
+	if e.contracts == nil {
+		return errors.New("no contracts found; missing var _ contract.Contract = &YourContract{} ?")
 	}
 	return e.writeBinary()
 }
@@ -113,7 +110,7 @@ func (e *Eddie) findContracts() error {
 							// assignmentType is the LHS type.
 							assignmentType, _ := pkg.TypesInfo.TypeOf(v.Type).(*types.Named)
 							if assignmentType == nil ||
-								assignmentType.Obj().Pkg().Path() != e.contractPkg ||
+								!util.InPackage(assignmentType.Obj(), contractPkg) ||
 								assignmentType.Obj().Name() != "Contract" {
 								continue
 							}
@@ -140,32 +137,28 @@ func (e *Eddie) findContracts() error {
 // configures the runtime and then compiles in into an executable
 // binary.
 func (e *Eddie) writeBinary() error {
-	tempDir, err := ioutil.TempDir("", "eddie")
-	if err != nil {
-		return err
-	}
-	if e.KeepTemp {
-		e.Logger.Printf("writing to temporary directory %s", tempDir)
-	} else {
-		defer func() {
-			if err := os.RemoveAll(tempDir); err != nil {
-				panic(err)
-			}
-		}()
+	packagePath := func(obj types.Object) string {
+		// Return the package path, but remove any vendor prefix.
+		path := obj.Pkg().Path()
+		if idx := strings.LastIndex(path, "/vendor/"); idx > 0 {
+			path = path[idx+8:]
+		}
+		return path
 	}
 
 	fnMap := template.FuncMap{
-		"ContractPkg": func() string { return e.contractPkg },
+		"ContractPkg": func() string { return contractPkg },
 		"Contracts":   func() []types.Object { return e.contracts },
 		"Help": func(obj types.Object) string {
 			// Ideally, this would emit the struct definition and
 			// additional documentation. For now, we'll create a godoc
 			// link for users to follow.
 			return fmt.Sprintf("`contract:%s\n\thttps://godoc.org/%s#%s`",
-				obj.Name(), obj.Pkg().Path(), obj.Name())
+				obj.Name(), packagePath(obj), obj.Name())
 		},
-		"Name":  func() string { return e.Name },
-		"RtPkg": func() string { return e.rtPkg },
+		"Name":        func() string { return e.Name },
+		"PackagePath": packagePath,
+		"RtPkg":       func() string { return rtPkg },
 	}
 
 	t, err := template.New("root").Funcs(fnMap).Parse(`
@@ -176,7 +169,7 @@ import (
 	ct "{{ ContractPkg }}"
 	rt "{{ RtPkg }}"
 	{{ range $idx, $c := Contracts -}}
-		c{{ $idx }} "{{ $c.Pkg.Path }}"
+		c{{ $idx }} "{{ PackagePath $c }}"
 	{{ end }}
 )
 
@@ -215,30 +208,14 @@ func main() {
 	src.Reset()
 	src.Write(formatted)
 
-	main := filepath.Join(tempDir, "main.go")
-	if err := ioutil.WriteFile(main, src.Bytes(), 0644); err != nil {
-		return err
-	}
-
-	exe, err := filepath.Abs(e.Outfile)
+	main, err := filepath.Abs(e.Outfile)
 	if err != nil {
 		return err
 	}
-
-	args := []string{"build", "-o", exe}
-	if e.Plugin {
-		args = append(args, "-buildmode=plugin")
+	if err := ioutil.WriteFile(main, src.Bytes(), 0644); err != nil {
+		return err
 	}
-	args = append(args, e.BuildFlags...)
-	args = append(args, main)
+	e.Logger.Printf("wrote source to %s", main)
 
-	build := exec.Command("go", args...)
-	build.Dir = e.Dir
-	build.Env = os.Environ()
-	if output, err := build.CombinedOutput(); err != nil {
-		return errors.Wrapf(err, "%s", output)
-	}
-
-	e.Logger.Printf("wrote output to %s", exe)
 	return nil
 }

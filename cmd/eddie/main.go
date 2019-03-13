@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 
 	"github.com/cockroachdb/eddie/pkg/gen"
+	"github.com/cockroachdb/eddie/pkg/util"
 	"github.com/spf13/cobra"
 )
 
@@ -40,7 +41,10 @@ func main() {
 			e.Logger = log.New(cmd.OutOrStdout(), "", 0 /* no flags */)
 			e.Packages = args
 			if stdlib {
-				e.Packages = append(e.Packages, "github.com/cockroachdb/eddie/pkg/contract/...")
+				e.Packages = append(e.Packages,
+					util.Base+"contract/...",
+					"./vendor/"+util.Base+"contract/...",
+				)
 			}
 			return e.Execute()
 		},
@@ -48,9 +52,8 @@ func main() {
 	root.Flags().StringSliceVar(&e.BuildFlags, "build_flags",
 		nil, "Additional build flags to pass to the compiler.")
 	root.Flags().StringVarP(&e.Dir, "dir", "d", ".", "The directory to operate in")
-	root.Flags().BoolVar(&e.KeepTemp, "keep_temp", false, "Keep the temporary directory")
-	root.Flags().StringVarP(&e.Name, "name", "n", "", "The name of the enforcer to generate (required)")
-	root.Flags().StringVarP(&e.Outfile, "out", "o", "", "Override the output filename (defaults to --name)")
+	root.Flags().StringVarP(&e.Name, "name", "n", "enforcer", "The name of the enforcer to generate")
+	root.Flags().StringVarP(&e.Outfile, "out", "o", "", "Override the output filename (defaults to --name.go)")
 	root.Flags().BoolVarP(&stdlib, "include_builtins", "b", false, "Include contracts from eddie source")
 
 	if err := root.Execute(); err != nil {

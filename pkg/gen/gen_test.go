@@ -15,11 +15,13 @@
 package gen
 
 import (
-	"io/ioutil"
+	"os"
+	"os/exec"
 	"plugin"
 	"testing"
 
 	"github.com/cockroachdb/eddie/pkg/rt"
+
 	"github.com/stretchr/testify/assert"
 )
 
@@ -30,35 +32,40 @@ func TestCompileAndLoad(t *testing.T) {
 	a := assert.New(t)
 
 	// Set up a temp file to hold the generated file.
-	exe, err := ioutil.TempFile("", "eddie")
-	if !a.NoError(err) {
+	if !a.NoError(os.MkdirAll("./testdata/cmd", 0755)) {
 		return
 	}
 
 	e := Eddie{
 		Dir:      "./testdata",
 		Name:     "gen_test",
-		Outfile:  exe.Name(),
+		Outfile:  "./testdata/cmd/eddie.go",
 		Packages: []string{"."},
 		Plugin:   true,
 	}
 	a.NoError(e.Execute())
 
-	// Now try to open the plugin. This is only (currently) supported on
-	// mac and linux platforms.
-	plg, err := plugin.Open(exe.Name())
-	if err != nil && err.Error() == "plugin: not implemented" {
-		t.SkipNow()
+	a.Len(e.contracts, 2)
+
+	cmd := exec.Command("go", "build", "--buildmode", "plugin", "-o", "eddie", ".")
+	cmd.Dir = "./testdata/cmd"
+	cmd.Env = os.Environ()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		a.NoError(err, string(output))
 	}
-	if !a.NoError(err) {
+	plg, err := plugin.Open("./testdata/cmd/eddie")
+	if err != nil {
+		// Not available on all platforms
+		if err.Error() == "plugin: not implemented" {
+			return
+		}
+		a.NoError(err)
 		return
 	}
-	// Look for the top-level var in the generated code.
 	sym, err := plg.Lookup("Enforcer")
 	if !a.NoError(err) {
 		return
 	}
-
-	impl := sym.(*rt.Enforcer)
-	a.Len(impl.Contracts, 2)
+	enf := sym.(*rt.Enforcer)
+	a.Len(enf.Contracts, 2)
 }
